@@ -1,52 +1,24 @@
-# myproject/pipelines.py
-
-import os
+from itemadapter import ItemAdapter
 import sqlite3
-import requests
-from scrapy.pipelines.files import FilesPipeline
+from .items import Album, Song
 
-class DownloadFilesPipeline(FilesPipeline):
 
-    def file_path(self, request, response=None, info=None, *, item=None):
-        # Custom file path for the downloaded files
-        return f'downloads/{item["name"]}.mp3'
+class FetchMusicPipeline:
 
-    def item_completed(self, results, item, info):
-        for ok, result in results:
-            if ok:
-                item['file_path'] = result['path']
-        return item
+    def __init__(self):
+        pass
 
-class SQLitePipeline:
-    def open_spider(self, spider):
-        self.connection = sqlite3.connect('music.db')
-        self.cursor = self.connection.cursor()
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS songs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                song_no TEXT,
-                name TEXT,
-                artist TEXT,
-                duration TEXT,
-                download_link TEXT,
-                file_path TEXT
-            )
-        ''')
-        self.connection.commit()
-
-    def close_spider(self, spider):
-        self.connection.close()
+    def create_db(self):
+        self.conn = sqlite3.connect("../server.db")
+        self.curr = self.conn.cursor()
+    
+    def create_tables(self):
+        self.curr.executescript("create_tables.sql")
 
     def process_item(self, item, spider):
-        self.cursor.execute('''
-            INSERT INTO songs (song_no, name, artist, duration, download_link, file_path) VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            item.get('song_no'),
-            item.get('name'),
-            item.get('artist'),
-            item.get('duration'),
-            item.get('Download_link'),
-            item.get('file_path')
-        ))
-        self.connection.commit()
+        if isinstance(item, Song):
+            adapter = ItemAdapter(item)
+            if "-" in adapter.get("name"):
+                adapter["name"] = adapter["name"].split("-")[0]
+                print(adapter["name"])
         return item
