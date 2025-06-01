@@ -1,104 +1,93 @@
 from itemadapter import ItemAdapter
+from libsql_client import create_client
 import sqlite3
 from .items import Album, Song
 import os
+from sqlmodel import SQLModel, Session, Field, Relationship, create_engine
+# from sqlalchemy.pool import StaticPool
+# from sqlalchemy import create_engine
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+from dotenv import load_dotenv
+
+class AlbumDb(SQLModel, table=True):
+    id: int = Field(primary_key=True)
+    name: str = Field(index=True)
+    artist: str = Field(index=True)
+    runtime: str
+    songs: list["SongDb"] = Relationship(back_populates="album")
+
+
+class SongDb(SQLModel, table=True):
+    song_id: int = Field(primary_key=True)
+    coverart: str = Field(default=None)
+    name: str = Field(index=True)
+    artist: str = Field(index=True)
+    duration: str = Field(default=None)
+    download_link: str = Field(default=None)
+    album_id : int | None = Field(default=None, foreign_key="albumdb.id")
+    album: AlbumDb | None = Relationship(back_populates="songs")
+    
 
 
 class FetchmusicPipeline:
 
     def __init__(self):
-        self.create_db()
-        self.create_tables()
+        load_dotenv()
+        self.engine = create_engine(os.environ.get("NEON_URL"))
+        SQLModel.metadata.create_all(self.engine)
+        # self.dbfunctions()
+        auth_manager = SpotifyClientCredentials(client_id=os.environ.get("ID"), client_secret=os.environ.get("SECRET"))
+        self.sp = spotipy.Spotify(auth_manager=auth_manager)
         
-
-    def create_db(self):
-        self.conn = sqlite3.connect(os.path.join(os.path.dirname(__file__), "server.db"))
-        self.curr = self.conn.cursor()
-    
-    def create_tables(self):
-        self.curr.executescript("""
-                -- Create the Song table if it does not exist
-CREATE TABLE IF NOT EXISTS Song (
-    song_id INTEGER PRIMARY KEY AUTOINCREMENT,  -- Unique identifier for each song
-    coverart TEXT,                               -- Cover art URL or path
-    song_no INTEGER,                             -- Song number in the album
-    name TEXT,                                   -- Name of the song
-    artist TEXT,                                 -- Artist of the song
-    duration INTEGER,                            -- Duration of the song in seconds
-    download_link TEXT                           -- Link to download the song
-);
-
--- Create the Album table if it does not exist
-CREATE TABLE IF NOT EXISTS Album (
-    album_id INTEGER PRIMARY KEY AUTOINCREMENT,  -- Unique identifier for each album
-    name TEXT,                                   -- Name of the album
-    artistName TEXT,                             -- Name of the artist
-    runtime INTEGER,                             -- Total runtime of the album in seconds
-    song_list TEXT                               -- List of song IDs (could be a comma-separated string or a JSON array)
-);
-
--- Create a junction table for the many-to-many relationship if it does not exist
-CREATE TABLE IF NOT EXISTS AlbumSong (
-    album_id INTEGER,
-    song_id INTEGER,
-    PRIMARY KEY (album_id, song_id),
-    FOREIGN KEY (album_id) REFERENCES Album(album_id),
-    FOREIGN KEY (song_id) REFERENCES Song(song_id)
-);
-
-
-""")
+    # async def dbfunctions(self):
+    #     db_url = os.environ.get("TURSO_URL")
+    #     db_token = os.environ.get("TURSO_TOKEN")
+    #     connection = create_client(db_url, auth_token=db_token).connect().cursor().connection
+    #     self.engine = create_engine("sqlite://", creator=lambda:connection, poolclass=StaticPool,connect_args={"check_same_thread":True})
+    #     SQLModel.metadata.create_all(self.engine)
+        
 
     def process_item(self, item, spider):
         print("processing item ...")
         if isinstance(item, Song):
             self.process_song(item)
         elif isinstance(item, Album):
-            ids = []
+            adapter = ItemAdapter(item)
+            album = AlbumDb(name= adapter.get("name"), artist=adapter.get("artist"), runtime=adapter.get("runtime"))
             for song in item.get("songs"):
-                self.insert_song(song)
-                self.curr.execute("SELECT song_id FROM Song WHERE name = ? AND artist = ?", (song.get("name"), song.get("artist")))
-                song_id = self.curr.fetchone()
-                ids.append(song_id)
-            self.insert_album(item, ids)
+                self.insert_song(song, album)
 
         return item
     
     def process_song(self, item):
         adapter = ItemAdapter(item)
-
-        title = adapter.get("name")
-        artist = adapter.get("artist")
-        if "-" in title:
-            adapter["name"] = title.split("-")[0].strip()
-            adapter["artist"] = title.split("-")[1].strip()
-            print("cleaner")
+        
+        title = adapter.get("name", "unknown")
+        if "–" in title :
+            parts = title.split("–")
+            adapter["name"] = parts[1].strip()
+            adapter["artist"] = parts[0].strip()
         self.insert_song(item)
-
-    def insert_song(self, item):
+        
+    def insert_song(self, item, album: AlbumDb | None = None):
         print("found  a song ...,,tryna add it to the database")
-        self.curr.execute(""" INSERT INTO Song (coverart, song_no, name, artist, duration, download_link) VALUES (?, ?, ?, ?, ?, ?) """, 
-            ( item.get('cover'), item.get('song_no'), item.get('name'), item.get('artist'), item.get('duration'), item.get('Download_link') ))
-        self.conn.commit()
+        adapter = ItemAdapter(item)
+        if adapter.get("cover") is None:
+            adapter["cover"] = self.sp.search(f"artist:{adapter['artist']} track:{adapter['name']}", limit=1)['tracks']['items'][0]['album']["images"][0]['url']
+        with Session(self.engine) as session:
+           try:
+                if album:
+                    song = SongDb(coverart=adapter.get("cover"),name=adapter.get("name"), artist=adapter.get("artist"), duration=adapter.get("duration", "empty"), album=album, download_link=adapter.get("Download_link"))
+                else:
+                    song = SongDb(coverart=adapter.get("cover"),name=adapter.get("name"), artist=adapter.get("artist"), duration=adapter.get("duration", "empty"), download_link=adapter.get("Download_link"))
+                session.add(song)
+                session.commit()
+                session.refresh(song)
+           finally:
+               session.close()
+            
+            
         
     
-    def insert_album_song(self, album_id, song_id):
-        self.curr.execute("""
-            INSERT INTO AlbumSong (album_id, song_id)
-            VALUES (?, ?)
-        """, (album_id, song_id))
-        self.conn.commit()
     
-    def insert_album(self, item, ids):
-        print("just spotted an album")
-        self.curr.execute("""
-                INSERT INTO Album (name, artistName, runtime, song_list)
-                VALUES (?, ?, ?, ?)
-            """, (
-                item.get("name"),
-                item.get("artist"),
-                item.get("runtime"),
-                ",".join(str(id) for id in ids)
-            ))
-        self.conn.commit()
-        

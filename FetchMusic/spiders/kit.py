@@ -33,6 +33,7 @@ class KitSpider(scrapy.Spider):
             song["duration"] = every_song.css("div.album-side-2 span::text").get()
             song["Download_link"] = every_song.css("div.mu-o-act a::attr(href)").get()
             tracks.append(song)
+            
         album = Album()
         album["name"] = response.css("figure.song-thumbnail img::attr(alt)").get()
         album["artist"] =response.css("div.song-id3-con li a::text").get()
